@@ -2,44 +2,28 @@
 
 ## 1. Design decision
 
-Describe one decision in your implementation, why you chose it, and its tradeoff.
-
-[Your answer]
+`Service.Progress` computes progress on every read from the append-only attempts returned by `Repository.List`, instead of storing a best-score aggregate. All rules live in one place, and a later lower score cannot overwrite anything. Tradeoff: each read loads the learner's whole attempt history for the course.
 
 ## 2. Design questions
 
-Brief answers are sufficient. No additional implementation is required.
-
 ### Retried requests
 
-How would you enforce globally unique attempt IDs, return the original result for an identical replay, and return 409 for different content under the same ID? Consider simultaneous requests with the same ID.
-
-[Your answer]
+Add a migration with `UNIQUE (attempt_id)` and insert with `ON CONFLICT (attempt_id) DO NOTHING RETURNING id`. If no row returns, load the stored attempt and compare all fields: identical → return it, different → `ErrConflict` (409, already mapped). For simultaneous requests, the unique index makes the second insert wait for the first to commit, then it takes the conflict path.
 
 ### Concurrent requests
 
-Two attempts with distinct IDs and scores of 90 and 70 arrive simultaneously for the same learner and lesson.
-
-Can your implementation lose the higher score? What could a simultaneous progress read observe? What should a new read return after both writes have committed? Is any protection needed?
-
-[Your answer]
+No. Both are independent inserts and the best score is a `max` at read time, so there is no read-modify-write to race. A simultaneous read sees a per-statement snapshot: no score, 70 or 90, each a valid state. Any read after both commits returns 90. No protection needed; it would be if we stored an aggregate (then `GREATEST` in one `UPDATE`).
 
 ### Redis
 
-Suppose attempt history grows and progress reads become slow.
-
-Would you use Redis? What would you store, how would it stay consistent with PostgreSQL, and what would happen if Redis were unavailable or its data were lost? An alternative approach is welcome.
-
-[Your answer]
+Not first. I would aggregate in PostgreSQL (`MAX(score) ... GROUP BY lesson_id` with an index on `(learner_id, course_id, lesson_id, score)`). If still slow, cache-aside in Redis: the computed progress per learner and course, with a TTL, deleted after the insert commits. PostgreSQL stays the source of truth; if Redis is down or flushed, reads fall back to PostgreSQL, with staleness bounded by the TTL.
 
 ## 3. Limitations and production readiness
 
-List any limitations or unfinished work, and what you would verify before production use.
-
-[Your answer]
+No idempotency, so a retried POST stores a duplicate (harmless to best score and pass status). Before production I would verify the attempt-ID migration, check query plans under large histories, add authorization so learners read only their own progress, and run `make lint` and the PostgreSQL test in CI.
 
 ## 4. Time and AI tools
 
-Time spent: [Actual time spent, up to four hours]
+Time spent: 1 hour and 20 minutes
 
-AI tools used: [None, or tools used and what they helped with]
+AI tools used: Claude (Anthropic) drafted the implementation, tests and this note. I reviewed every change, decided to inline the progress calculation into `Service.Progress`, and ran `make setup` and `make lint` locally. I can explain and change all of it.
